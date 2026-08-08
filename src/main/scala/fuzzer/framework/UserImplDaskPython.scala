@@ -441,13 +441,34 @@ Each function should be:
     val joinTypes = List("inner", "left", "right", "outer")
     val how = joinTypes(Random.nextInt(joinTypes.length))
 
-    UserImplFlinkPython.pickTwoColumns(node.value.stateView) match {
-      case Some(((_, leftCol), (_, rightCol))) => s"$in1.merge($in2, left_on='${leftCol.name}', right_on='${rightCol.name}', how='$how')"
-      case None =>
-        val col = pickRandomColumnFromReachableSources(node)
-        s"$in1.merge($in2, on='${col._2.name}', how='$how')"
-    }
+    val (leftCol, rightCol) = pickJoinColumnPair(node)
+    s"$in1.merge($in2, left_on='${leftCol.name}', right_on='${rightCol.name}', how='$how')"
+  }
 
+  // Picks one join column from each side of a binary op, constrained to columns that are
+  // actually reachable via that specific parent (in1 vs in2) - node.value.stateView is the
+  // union of both sides' reachable sources, so sampling from it directly can produce a
+  // left_on/right_on pair where one column doesn't exist on the dataframe it's assigned to.
+  private def pickJoinColumnPair(node: Node[DFOperator]): (ColumnMetadata, ColumnMetadata) = {
+    val leftSourceIds = node.parents.head.getReachableSources.map(_.id).toSet
+    val rightSourceIds = node.parents.last.getReachableSources.map(_.id).toSet
+
+    val leftCols = node.value.stateView.collect { case (id, t) if leftSourceIds.contains(id) => t.columns }.flatten.toList
+    val rightCols = node.value.stateView.collect { case (id, t) if rightSourceIds.contains(id) => t.columns }.flatten.toList
+
+    assert(leftCols.nonEmpty && rightCols.nonEmpty,
+      s"Expected both merge sides to have reachable columns: stateView = ${node.value.stateView}")
+
+    val leftByType = leftCols.groupBy(_.dataType)
+    val rightByType = rightCols.groupBy(_.dataType)
+    val commonTypes = leftByType.keySet.intersect(rightByType.keySet).toList
+
+    if (commonTypes.nonEmpty) {
+      val dt = Random.choice(commonTypes)
+      (Random.choice(leftByType(dt)), Random.choice(rightByType(dt)))
+    } else {
+      (Random.choice(leftCols), Random.choice(rightCols))
+    }
   }
 
   private def generateGenericUnaryOperation(
