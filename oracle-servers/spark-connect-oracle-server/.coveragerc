@@ -1,0 +1,6 @@
+[run]
+concurrency = multiprocessing
+parallel = True
+source = pyspark
+omit =
+    <string>

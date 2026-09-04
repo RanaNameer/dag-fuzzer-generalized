@@ -1,0 +1,145 @@
+{
+  "spark.read.parquet": {
+    "type": "source",
+    "parameters": {
+      "path": {
+        "type": "string",
+        "required": true
+      }
+    },
+    "returns": "DataFrame"
+  },
+  "alias": {
+    "type": "unary",
+    "parameters": {
+      "alias": {
+        "type": "str",
+        "required": true,
+        "state-altering": true,
+        "state-effect": "table-rename"
+      }
+    },
+    "returns": "DataFrame"
+  },
+  "mapInPandas": {
+    "type": "unary",
+    "parameters": {
+      "func": {
+        "type": "callable",
+        "required": true
+      },
+      "schema": {
+        "type": "str",
+        "required": true
+      }
+    },
+    "returns": "DataFrame"
+  },
+  "groupBy": {
+    "type": "unary",
+    "parameters": {
+      "cols": {
+        "type": "list[str]",
+        "required": true
+      }
+    },
+    "returns": "GroupedData"
+  },
+  "join": {
+    "type": "binary",
+    "parameters": {
+      "other": {
+        "type": "DataFrame",
+        "required": true
+      },
+      "on": {
+        "type": "Column",
+        "required": true
+      },
+      "how": {
+        "type": "str",
+        "required": true,
+        "default": "inner",
+        "values": ["inner", "outer", "left", "right"]
+      }
+    },
+    "returns": "DataFrame"
+  },
+  "withColumn": {
+    "type": "unary",
+    "parameters": {
+      "colName": {
+        "type": "str",
+        "required": true,
+        "state-altering": true,
+        "state-effect": "column-add"
+      },
+      "col": {
+        "type": "Column",
+        "required": true
+      }
+    },
+    "returns": "DataFrame"
+  },
+  "filter": {
+    "type": "unary",
+    "parameters": {
+      "condition": {
+        "type": "Column",
+        "required": true
+      }
+    },
+    "returns": "DataFrame"
+  },
+  "select": {
+    "type": "unary",
+    "parameters": {
+      "cols": {
+        "type": "list[str]",
+        "required": true
+      }
+    },
+    "returns": "DataFrame"
+  },
+  "orderBy": {
+    "type": "unary",
+    "parameters": {
+      "cols": {
+        "type": "list[str]",
+        "required": true
+      },
+      "ascending": {
+        "type": "bool",
+        "required": false,
+        "default": true
+      }
+    },
+    "returns": "DataFrame"
+  },
+  "distinct": {
+    "type": "unary",
+    "parameters": {},
+    "returns": "DataFrame"
+  },
+  "limit": {
+    "type": "unary",
+    "parameters": {
+      "num": {
+        "type": "int",
+        "required": true
+      }
+    },
+    "returns": "DataFrame"
+  },
+  "offset": {
+    "type": "unary",
+    "parameters": {
+      "num": {
+        "type": "int",
+        "required": true,
+        "description": "Number of initial rows to skip before returning results"
+      }
+    },
+    "returns": "DataFrame"
+  }
+}

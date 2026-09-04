@@ -148,6 +148,76 @@ object FuzzerConfig {
     )
   }
 
+  def getPandasPythonConfig: FuzzerConfig = {
+    FuzzerConfig(
+      master = "local[*]",
+      targetAPI = "pandas-python",
+      specPath = "specs/pandas-python.json",
+      exitAfterNSuccesses = true,
+      N = 50,
+      d = 200,
+      p = 5,
+      outDir = "./target/dagfuzz-out/pandas-python/artifacts",
+      outExt = ".py",
+      timeLimitSec = 10,
+      dagGenDir = "dag-gen/DAGs/DAGs",
+      localTpcdsPath = "tpcds-data-5pc",
+      seed = "ahmad35".hashCode,
+      maxStringLength = 5,
+      updateLiveStatsAfter = 10,
+      intermediateVarPrefix = "auto",
+      finalVariableName = "sink",
+      probUDFInsert = 0.1,
+      maxListLength = 1,
+      randIntMin = -50,
+      randIntMax = 50,
+      randFloatMin = -50.0,
+      randFloatMax = 50.0,
+      logicalOperatorSet = Set(">", "<", ">=", "<="),
+      replay = false,
+      artifactsDir = null,
+      debugMode = false,
+      numUdfsPerLLMCall = 10,
+      refreshUdfsAfter = 10000,
+      coverageCaptureOn = true,
+    )
+  }
+
+  def getSparkConnectPythonConfig: FuzzerConfig = {
+    FuzzerConfig(
+      master = "local[*]",
+      targetAPI = "spark-connect-python",
+      specPath = "specs/spark-connect-python.json",
+      exitAfterNSuccesses = true,
+      N = 50,
+      d = 200,
+      p = 5,
+      outDir = "./target/dagfuzz-out/spark-connect-python/artifacts",
+      outExt = ".py",
+      timeLimitSec = 10,
+      dagGenDir = "dag-gen/DAGs/DAGs",
+      localTpcdsPath = "tpcds-data-5pc",
+      seed = "ahmad35".hashCode,
+      maxStringLength = 5,
+      updateLiveStatsAfter = 5,
+      intermediateVarPrefix = "auto",
+      finalVariableName = "sink",
+      probUDFInsert = 0.1,
+      maxListLength = 1,
+      randIntMin = -50,
+      randIntMax = 50,
+      randFloatMin = -50.0,
+      randFloatMax = 50.0,
+      logicalOperatorSet = Set(">", "<", ">=", "<="),
+      replay = false,
+      artifactsDir = null,
+      debugMode = false,
+      numUdfsPerLLMCall = 10,
+      refreshUdfsAfter = 10000,
+      coverageCaptureOn = true,
+    )
+  }
+
   def getTensorflowPythonConfig: FuzzerConfig = {
     FuzzerConfig(
       master = "local[*]",

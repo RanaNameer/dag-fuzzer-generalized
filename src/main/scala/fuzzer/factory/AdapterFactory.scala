@@ -5,6 +5,8 @@ import fuzzer.adapters.spark.{SparkCodeExecutor, SparkCodeGenerator, SparkDataAd
 import fuzzer.adapters.flink.{FlinkCodeExecutor, FlinkCodeGenerator, FlinkDataAdapter}
 import fuzzer.adapters.polars.{PolarsCodeExecutor, PolarsCodeGenerator, PolarsDataAdapter}
 import fuzzer.adapters.tensorflow.{TensorflowCodeExecutor, TensorflowCodeGenerator, TensorflowDataAdapter}
+import fuzzer.adapters.pandas.{PandasCodeExecutor, PandasCodeGenerator, PandasDataAdapter}
+import fuzzer.adapters.sparkconnect.{SparkConnectCodeExecutor, SparkConnectCodeGenerator, SparkConnectDataAdapter}
 import fuzzer.code.SourceCode
 import fuzzer.core.global.FuzzerConfig
 import fuzzer.core.graph.{DFOperator, Graph}
@@ -44,6 +46,18 @@ object AdapterFactory {
         val dataAdapter = new PolarsDataAdapter(config)
         val codeGenerator = new PolarsCodeGenerator(config, spec, dag2CodeFunc)
         val codeExecutor = new PolarsCodeExecutor(config, spec)
+        (dataAdapter, codeGenerator, codeExecutor)
+
+      case "pandas-python" =>
+        val dataAdapter = new PandasDataAdapter(config)
+        val codeGenerator = new PandasCodeGenerator(config, spec, dag2CodeFunc)
+        val codeExecutor = new PandasCodeExecutor(config, spec)
+        (dataAdapter, codeGenerator, codeExecutor)
+
+      case "spark-connect-python" =>
+        val dataAdapter = new SparkConnectDataAdapter(config)
+        val codeGenerator = new SparkConnectCodeGenerator(config, spec, dag2CodeFunc)
+        val codeExecutor = new SparkConnectCodeExecutor(config, spec)
         (dataAdapter, codeGenerator, codeExecutor)
       case _ =>
         throw new IllegalArgumentException(s"Unsupported API: ${config.targetAPI}")
