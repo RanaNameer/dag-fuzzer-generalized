@@ -4,6 +4,7 @@ spark-warehouse/
 .bsp/
 .idea/
 lib*/
+/lib
 metastore_db/
 dag-gen/
 derby.log
