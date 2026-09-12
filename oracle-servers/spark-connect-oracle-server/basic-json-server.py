@@ -98,8 +98,10 @@ def execute_in_process(code, result_queue, cov_dir, mode):
         exec(preamble + code, namespace, namespace)
         spark = namespace.get("spark")
 
-        result_df = namespace.get("result")
-        rows = [r.asDict(recursive=True) for r in result_df.collect()]
+        # The generated code itself calls .collect() and captures result_rows/result_schema -
+        # read those directly rather than calling .collect() again here, which would otherwise
+        # execute the query a second time.
+        rows = namespace.get("result_rows")
         rows.sort(key=_row_sort_key)  # normalize order - neither engine guarantees row order
 
         result_queue.put({
@@ -107,7 +109,7 @@ def execute_in_process(code, result_queue, cov_dir, mode):
             "error_name": "",
             "error_message": "",
             "stdout": captured_output.getvalue(),
-            "schema": result_df.schema.simpleString(),
+            "schema": namespace.get("result_schema"),
             "rows": rows,
         })
     except Exception as e:

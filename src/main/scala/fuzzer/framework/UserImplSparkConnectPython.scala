@@ -4,7 +4,7 @@ import fuzzer.code.SourceCode
 import fuzzer.core.exceptions.DAGFuzzerException
 import fuzzer.core.graph.{DFOperator, Graph, Node}
 import fuzzer.data.tables.{ColumnMetadata, TableMetadata}
-import fuzzer.data.types.{BooleanType, DataType, DecimalType, FloatType, IntegerType, LongType, StringType}
+import fuzzer.data.types.{BooleanType, DataType, DateType, DecimalType, FloatType, IntegerType, LongType, StringType}
 import fuzzer.utils.random.Random
 import play.api.libs.json._
 
@@ -55,6 +55,7 @@ object UserImplSparkConnectPython {
     val finalVariableName = "result"
 
     l += "from pyspark.sql import functions as F"
+    l += "from pyspark.sql.types import StringType"
     l += preamble
 
     graph.traverseTopological { node =>
@@ -71,8 +72,12 @@ object UserImplSparkConnectPython {
       l += s"$lhs$call"
     }
 
-    // No trigger/print line needed here - unlike Dask/pandas, the oracle server grabs
-    // namespace["result"] directly and calls .collect() on it itself.
+    // Explicit execution trigger, matching the pattern in UserImplSparkScala (.collect())
+    // and UserImplFlinkPython (.explain()) - the generated program itself forces execution
+    // and captures the result, rather than relying on the oracle server to call .collect()
+    // separately after exec() (which would otherwise mean computing the query twice).
+    l += s"${finalVariableName}_rows = [r.asDict(recursive=True) for r in $finalVariableName.collect()]"
+    l += s"${finalVariableName}_schema = $finalVariableName.schema.simpleString()"
 
     val code = l.mkString("\n")
     SourceCode(src = code, ast = null, preamble = preamble)
@@ -85,23 +90,25 @@ object UserImplSparkConnectPython {
   // mapInPandas needs a per-partition iterator function, but the preloaded UDF pool (shared
   // shape with Dask's mapPartitionsUdf / pandas' dfPipeUdf) is just a plain df->df transform -
   // this wraps it into the iterator form mapInPandas actually requires.
+  //
+  // A second, independent pool of scalar UDFs (scalarUdf) is registered alongside it for use
+  // inside withColumn - composing with mapInPandas, cast expressions, and each other across a
+  // generated program's operator chain (any later operator sees whichever one fired earlier,
+  // no special-casing needed for "composition").
   def generatePreamble(): String = {
     s"""
        |${generatePreloadedUDF()}
        |def mapInPandasUdf(iterator):
        |    for pdf in iterator:
        |        yield dfTransformUdf(pdf)
+       |
+       |${generatePreloadedScalarUDF()}
+       |spark_scalar_udf = F.udf(scalarUdf, StringType())
        |""".stripMargin
   }
 
   def generatePreloadedUDF(): String = {
     val config = fuzzer.core.global.State.config.get
-
-    val pythonScriptPath: String = "llm-caller/generator.py"
-    val numTries: Int = 3
-    val batch = (fuzzer.core.global.State.iteration / config.refreshUdfsAfter).toInt
-    val outDir = s"generated/SparkConnect"
-    val outPath = s"$outDir/udfs_$batch.json"
     val prompt = s"""
 Generate a json file of the following format
 ```
@@ -119,60 +126,99 @@ Each function should be:
   columns/dtypes will cause a schema mismatch error at runtime)
 """.trim
 
-    val udfList =
-      if (!Files.exists(Paths.get(outPath)) ||
-        (fuzzer.core.global.State.iteration % config.refreshUdfsAfter) == 0) {
+    Random.choice(loadOrGenerateUdfPool("udfs", prompt))
+  }
 
-        var lastException: Throwable = null
-        var attempt = 0
-        var success = false
+  // Scalar UDFs get applied to columns of any dtype (int, string, float, bool, date) via
+  // withColumn, so - unlike the whole-DataFrame pool above, which just has to preserve
+  // structure - these have to be safe to register with a single fixed return type regardless
+  // of what column they're handed. Always returning a string (str() never fails on an
+  // ordinary value) keeps them generic-by-construction rather than needing a pool per dtype.
+  def generatePreloadedScalarUDF(): String = {
+    val config = fuzzer.core.global.State.config.get
+    val prompt = s"""
+Generate a json file of the following format
+```
+{ "functions": ["def scalarUdf(x): ..."] }
+```
+The functions array should contain ${config.numUdfsPerLLMCall} Python functions. Each function should be short and simple.
+Each function should be:
+- Named "scalarUdf"
+- Complete and runnable
+- Contain only code (no comments or docstrings)
+- Take a single scalar argument, which may be an int, float, str, bool, or None
+- Always return a string, regardless of the input value or type (coerce with str() if needed)
+- Should be between 1-5 lines of code
+- Must never raise an exception, for any input value or type
+""".trim
 
-        while (attempt < numTries && !success) {
-          try {
-            generatePreloadedUDF(
-              pythonScriptPath,
-              prompt,
-              outDir,
-              outPath
+    Random.choice(loadOrGenerateUdfPool("scalar_udfs", prompt))
+  }
+
+  // Shared retry/cache/fallback logic behind both UDF pools above: check the current batch's
+  // JSON file, regenerate via the LLM script on a cache miss or at a refresh boundary (falling
+  // back to the most recent previous batch, or failing the campaign, if generation itself
+  // fails), otherwise just read what's already cached.
+  private def loadOrGenerateUdfPool(poolName: String, prompt: String): List[String] = {
+    val config = fuzzer.core.global.State.config.get
+
+    val pythonScriptPath: String = "llm-caller/generator.py"
+    val numTries: Int = 3
+    val batch = (fuzzer.core.global.State.iteration / config.refreshUdfsAfter).toInt
+    val outDir = s"generated/SparkConnect"
+    val outPath = s"$outDir/${poolName}_$batch.json"
+
+    if (!Files.exists(Paths.get(outPath)) ||
+      (fuzzer.core.global.State.iteration % config.refreshUdfsAfter) == 0) {
+
+      var lastException: Throwable = null
+      var attempt = 0
+      var success = false
+
+      while (attempt < numTries && !success) {
+        try {
+          generatePreloadedUDF(
+            pythonScriptPath,
+            prompt,
+            outDir,
+            outPath
+          )
+          success = true
+        } catch {
+          case e: Throwable =>
+            lastException = e
+            attempt += 1
+        }
+      }
+
+      if (!success) {
+        val outPathObj = Paths.get(outPath)
+        if (Files.exists(outPathObj)) {
+          Files.delete(outPathObj)
+        }
+
+        val previousBatchOpt =
+          (0 until batch).reverse
+            .map(b => s"$outDir/${poolName}_$b.json")
+            .find(p => Files.exists(Paths.get(p)))
+
+        previousBatchOpt match {
+          case Some(prevPath) =>
+            readFunctionsFromJson(prevPath)
+
+          case None =>
+            throw new DAGFuzzerException(
+              s"UDF Generation failed after $numTries tries and no previous batch exists (pool=$poolName)",
+              lastException
             )
-            success = true
-          } catch {
-            case e: Throwable =>
-              lastException = e
-              attempt += 1
-          }
         }
-
-        if (!success) {
-          val outPathObj = Paths.get(outPath)
-          if (Files.exists(outPathObj)) {
-            Files.delete(outPathObj)
-          }
-
-          val previousBatchOpt =
-            (0 until batch).reverse
-              .map(b => s"$outDir/udfs_$b.json")
-              .find(p => Files.exists(Paths.get(p)))
-
-          previousBatchOpt match {
-            case Some(prevPath) =>
-              readFunctionsFromJson(prevPath)
-
-            case None =>
-              throw new DAGFuzzerException(
-                s"UDF Generation failed after $numTries tries and no previous batch exists",
-                lastException
-              )
-          }
-        } else {
-          readFunctionsFromJson(outPath)
-        }
-
       } else {
         readFunctionsFromJson(outPath)
       }
 
-    Random.choice(udfList)
+    } else {
+      readFunctionsFromJson(outPath)
+    }
   }
 
   def generatePreloadedUDF(pythonScriptPath: String, prompt: String, outDir: String, outPath: String): List[String] = {
@@ -327,6 +373,32 @@ Each function should be:
     }
   }
 
+  // A target type per source dtype for CAST() coverage. Kept independent of whether the cast
+  // will actually succeed on the underlying data (e.g. StringType -> int on our random string
+  // data will mostly fail) - a failed cast just yields null rather than raising, so this
+  // exercises real type-coercion code paths on both the succeeding and failing side for free.
+  private def castTargetType(dt: DataType): String = dt match {
+    case IntegerType | LongType => Random.choice(List("string", "double", "boolean"))
+    case FloatType | DecimalType => Random.choice(List("string", "int", "long"))
+    case StringType => Random.choice(List("int", "double", "boolean"))
+    case BooleanType => Random.choice(List("int", "string"))
+    case DateType => Random.choice(List("string", "timestamp"))
+    case _ => "string"
+  }
+
+  private def generateCastExpr(col: ColumnMetadata, dfVar: String): String = {
+    s"$dfVar['${col.name}'].cast('${castTargetType(col.dataType)}')"
+  }
+
+  // isNotNull()/isNull() rather than a type-specific comparison: safe regardless of the cast's
+  // target type (no risk of generating a type-mismatched comparison), while still exercising
+  // the cast itself - a successful cast passes through, a failed one yields null and gets
+  // filtered on either side of the check.
+  private def generateCastPredicate(col: ColumnMetadata, dfVar: String): String = {
+    val castExpr = generateCastExpr(col, dfVar)
+    if (Random.nextBoolean()) s"$castExpr.isNotNull()" else s"$castExpr.isNull()"
+  }
+
   private def generateWithColumnOperation(
                                            node: Node[DFOperator],
                                            parameters: JsObject,
@@ -334,7 +406,15 @@ Each function should be:
                                          ): String = {
     val newColName = Random.alphanumeric.take(8).mkString
     val (_, col) = pickRandomColumnFromReachableSources(node)
-    val expr = generateColumnExpr(col, in1)
+
+    // Composes with whatever earlier operators already did to this branch (mapInPandas, a
+    // previous withColumn, a join, ...) purely by virtue of operating on in1's current
+    // columns - no special-casing needed to "chain" these together across the DAG.
+    val roll = Random.nextDouble()
+    val expr =
+      if (roll < 0.3) s"spark_scalar_udf($in1['${col.name}'])"
+      else if (roll < 0.55) generateCastExpr(col, in1)
+      else generateColumnExpr(col, in1)
 
     updateSourceState(node, parameters \ "colName", "colName", "str", newColName)
     propagateState(node)
@@ -344,20 +424,25 @@ Each function should be:
 
   def generateFilterPredicate(node: Node[DFOperator], dfVar: String): String = {
     val (_, col) = pickRandomColumnFromReachableSources(node)
-    col.dataType match {
-      case IntegerType | LongType =>
-        val value = Random.nextInt(100)
-        val ops = List(">", "<", ">=", "<=", "==", "!=")
-        val op = ops(Random.nextInt(ops.length))
-        s"$dfVar['${col.name}'] $op $value"
-      case FloatType | DecimalType =>
-        s"$dfVar['${col.name}'] > ${Random.nextFloat() * 100}"
-      case StringType =>
-        s"F.length($dfVar['${col.name}']) > 5"
-      case BooleanType =>
-        if (Random.nextBoolean()) s"$dfVar['${col.name}']" else s"~$dfVar['${col.name}']"
-      case _ =>
-        s"$dfVar['${col.name}'].isNotNull()"
+
+    if (Random.nextDouble() < 0.2) {
+      generateCastPredicate(col, dfVar)
+    } else {
+      col.dataType match {
+        case IntegerType | LongType =>
+          val value = Random.nextInt(100)
+          val ops = List(">", "<", ">=", "<=", "==", "!=")
+          val op = ops(Random.nextInt(ops.length))
+          s"$dfVar['${col.name}'] $op $value"
+        case FloatType | DecimalType =>
+          s"$dfVar['${col.name}'] > ${Random.nextFloat() * 100}"
+        case StringType =>
+          s"F.length($dfVar['${col.name}']) > 5"
+        case BooleanType =>
+          if (Random.nextBoolean()) s"$dfVar['${col.name}']" else s"~$dfVar['${col.name}']"
+        case _ =>
+          s"$dfVar['${col.name}'].isNotNull()"
+      }
     }
   }
 
