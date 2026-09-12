@@ -9,9 +9,7 @@ import fuzzer.data.tables.TableMetadata
 import fuzzer.templates.Harness
 import fuzzer.utils.spark.tpcds.TPCDSTablesLoader
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
-import org.apache.spark.sql.expressions.Window
 //import org.apache.spark.sql.catalyst.rules.Rule.coverage
-import org.apache.spark.sql.functions.{lit, row_number}
 import org.apache.spark.sql.{DataFrame, SparkSession}
 import play.api.libs.json.JsValue
 
@@ -124,24 +122,26 @@ class SparkCodeExecutor(config: FuzzerConfig, spec: JsValue) extends CodeExecuto
   }
 
   def oracleDFComparison(optDF: DataFrame, unOptDF: DataFrame): Throwable = {
-    // Add a deterministic row id so order is considered in equality.
-    // We use row_number over a constant sort key to create a sequence per DF.
-    val w = Window.orderBy(lit(1))
-    val lhs = optDF.withColumn("__row_id__", row_number().over(w))
-    val rhs = unOptDF.withColumn("__row_id__", row_number().over(w))
-
-    // Compare schemas first (including nullability & types)
-    if (lhs.schema != rhs.schema) {
+    // Compare schemas first (names, types, nullability).
+    if (optDF.schema != unOptDF.schema) {
       return new MismatchException(
         s"""Schemas don't match
-           |optDF schema: ${lhs.schema.treeString}
-           |unOptDF schema: ${rhs.schema.treeString}
+           |optDF schema: ${optDF.schema.treeString}
+           |unOptDF schema: ${unOptDF.schema.treeString}
            |""".stripMargin)
     }
 
-    // Set-minus both ways with counts (use exceptAll to respect duplicates)
-    val diffL = lhs.exceptAll(rhs)
-    val diffR = rhs.exceptAll(lhs)
+    // Order-agnostic multiset comparison. exceptAll is a bag difference (respects
+    // duplicate counts), so both directions being empty <=> the two results are the
+    // same multiset of rows. A DataFrame query with no top-level ORDER BY has no
+    // guaranteed row order, so optimized vs unoptimized runs may legitimately return
+    // the same rows in a different order - only the multiset must match. (The previous
+    // implementation injected a row_number() over Window.orderBy(lit(1)); ordering by a
+    // constant does not define an order, so that row id was assigned in arbitrary
+    // per-DataFrame execution order and made the comparison pass or false-fail on
+    // execution-order luck.)
+    val diffL = optDF.exceptAll(unOptDF)
+    val diffR = unOptDF.exceptAll(optDF)
 
     val leftCount  = diffL.limit(1).count()  // cheap emptiness check
     val rightCount = diffR.limit(1).count()
@@ -150,12 +150,12 @@ class SparkCodeExecutor(config: FuzzerConfig, spec: JsValue) extends CodeExecuto
       new Success("DFs match")
     } else {
       // Collect a small, readable sample of diffs from both sides
-      val sampleLeft  = diffL.drop("__row_id__").limit(20).toJSON.collect().mkString("\n")
-      val sampleRight = diffR.drop("__row_id__").limit(20).toJSON.collect().mkString("\n")
+      val sampleLeft  = diffL.limit(20).toJSON.collect().mkString("\n")
+      val sampleRight = diffR.limit(20).toJSON.collect().mkString("\n")
 
       new MismatchException(
         s"""
-           |Outputs don't match (order-sensitive)
+           |Outputs don't match (order-agnostic multiset comparison)
            |
            |Rows in optDF but not in unOptDF (up to 20):
            |$sampleLeft
